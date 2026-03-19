@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         run: pip install pyautogui psutil --quiet
 
-      - name: 2. RustDesk Install + ID + Password (إصدار 1.4.6 - أحدث)
+      - name: 2. RustDesk Install + ID + Password
         shell: pwsh
         run: |
           $rdUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.4.6/rustdesk-1.4.6-x86_64.exe"
@@ -45,7 +45,7 @@ jobs:
           Write-Host "Installing RustDesk Service..."
           & $rd --install-service
 
-          # Retry loop مبسط وآمن
+          # Retry loop (معدل للاستقرار)
           $id = $null
           $attempt = 0
           while ($attempt -lt 10 -and -not $id) {
@@ -53,30 +53,31 @@ jobs:
             Write-Host "Attempt $attempt/10 to get ID..."
             Start-Sleep -Seconds 8
 
-            $raw = & $rd --get-id 2>$null
-            $clean = $raw.Trim()
+            # مهم: --get-id على Windows يحتاج | more أو Out-String عشان يخرج الـ output
+            $raw = (& $rd --get-id | Out-String).Trim()
 
-            if (\( clean -match '^[0-9]{6,10} \)') {
-              $id = $clean
+            if (\( raw -match '^[0-9]{6,10} \)') {
+              $id = $raw
               Write-Host "✅ Success! RustDesk ID = $id"
             } else {
+              Write-Host "Got: '$raw' (not valid yet)"
               Start-Sleep -Seconds 5
             }
           }
 
           if (-not $id) {
-            Write-Error "Failed to get ID after 10 attempts"
+            Write-Error "Failed to get ID after 10 attempts. Last output: '$raw'"
             exit 1
           }
 
-          $pass = "disalardp2026"
+          $pass = "disalardp2026"  # غيريها لو عايزة
           Write-Host "Setting password..."
           & $rd --password $pass
 
           "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
           "RUSTDESK_PASS=$pass" >> $env:GITHUB_ENV
 
-      - name: 3. Final Info + Keep-Alive (Custom Duration)
+      - name: 3. Final Info + Keep-Alive
         if: always()
         shell: pwsh
         env:
@@ -90,26 +91,11 @@ jobs:
           Write-Host "ازاي تتصلي:"
           Write-Host "1. حملي تطبيق RustDesk على جهازك"
           Write-Host "2. افتحيه وادخلي الـ ID + الـ Password"
-          Write-Host "3. اضغطي Connect (هيشتغل فوراً)"
+          Write-Host "3. اضغطي Connect"
 
           $endTime = (Get-Date).AddHours($env:DURATION_HOURS)
           while ((Get-Date) -lt $endTime) {
               Write-Host "$(Get-Date -Format 'HH:mm:ss') | RustDesk $env:RUSTDESK_ID | Online"
               Start-Sleep -Seconds (Get-Random -Minimum 45 -Maximum 75)
           }
-          Write-Host "Session ended safely."            } else {
-              Start-Sleep -Seconds 5
-            }
-          }
-
-          if (-not $id) {
-            Write-Error "Failed to get ID after 10 attempts"
-            exit 1
-          }
-
-          $pass = "disalardp2026"   # غيّريها لو عايزة
-          Write-Host "Setting password..."
-          & $rd --password $pass
-
-          "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
-          "RUSTDESK_PASS=$pass" >> $env:GITHUB_ENV
+          Write-Host "Session ended safely."
