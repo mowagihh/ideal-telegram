@@ -1,0 +1,52 @@
+- name: 2. RustDesk Install + ID + Password (إصدار 1.4.6 - أحدث)
+        shell: pwsh
+        run: |
+          $rdUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.4.6/rustdesk-1.4.6-x86_64.exe"
+          $rdInstaller = "rustdesk.exe"
+          Write-Host "Downloading RustDesk..."
+          Invoke-WebRequest -Uri $rdUrl -OutFile $rdInstaller
+
+          Write-Host "Silent Install..."
+          Start-Process $rdInstaller -ArgumentList "--silent-install" -Wait
+          Start-Sleep -Seconds 12
+
+          $rd = "C:\Program Files\RustDesk\rustdesk.exe"
+
+          if (-Not (Test-Path $rd)) {
+            Write-Error "RustDesk not found!"
+            exit 1
+          }
+
+          Write-Host "Installing RustDesk Service..."
+          & $rd --install-service
+
+          # Retry loop مبسط عشان ما يحصلش ParserError تاني
+          $id = $null
+          $attempt = 0
+          while ($attempt -lt 10 -and -not $id) {
+            $attempt++
+            Write-Host "Attempt $attempt/10 to get ID..."
+            Start-Sleep -Seconds 8
+
+            $raw = & $rd --get-id 2>$null
+            $clean = $raw.Trim()
+
+            if (\( clean -match '^[0-9]{6,10} \)') {
+              $id = $clean
+              Write-Host "✅ Success! RustDesk ID = $id"
+            } else {
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          if (-not $id) {
+            Write-Error "Failed to get ID after 10 attempts"
+            exit 1
+          }
+
+          $pass = "disalardp2026"   # غيّريها لو عايزة
+          Write-Host "Setting password..."
+          & $rd --password $pass
+
+          "RUSTDESK_ID=$id" >> $env:GITHUB_ENV
+          "RUSTDESK_PASS=$pass" >> $env:GITHUB_ENV
