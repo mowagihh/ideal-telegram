@@ -65,7 +65,7 @@ jobs:
           
           echo [SUCCESS] Valid ID found: %ID%
           echo [INFO] Setting password for Full Access...
-          echo disalardp | "%adPath%" --set-password _full_access
+          echo wagih | "%adPath%" --set-password _full_access
           
           echo ANYDESK_ID=%ID% >> %GITHUB_ENV%
 
