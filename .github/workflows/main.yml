@@ -72,11 +72,11 @@ jobs:
       - name: 4. Final Status & Keep Alive
         shell: powershell
         run: |
-          $endTime = (Get-Date).AddHours(6)
+          $endTime = (Get-Date).AddHours(16)
           Write-Host "========================================"
           Write-Host "ANYDESK READY"
           Write-Host "ID: $env:ANYDESK_ID"
-          Write-Host "Password: disalardp"
+          Write-Host "Password: wagih"
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "========================================"
           
