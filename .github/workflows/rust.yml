@@ -1,0 +1,138 @@
+name: RustDesk Remote Access
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rustdesk-session:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install Tailscale
+        shell: powershell
+        run: |
+          Write-Host "=== Installing Tailscale ==="
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi -OutFile tailscale.msi
+          Start-Process msiexec.exe -ArgumentList "/i", "tailscale.msi", "/quiet", "/norestart" -Wait
+          
+          Start-Sleep -Seconds 10
+          
+          Write-Host "=== Connecting to Tailscale ==="
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          Start-Process -FilePath $ts -ArgumentList "up", "--authkey=${{ secrets.TAILSCALE_AUTHKEY }}", "--hostname=rustdesk-${{ github.run_id }}" -NoNewWindow
+          
+          Start-Sleep -Seconds 15
+          
+          $tsIP = $null
+          for ($i = 1; $i -le 15; $i++) {
+              $tsIP = & $ts ip -4 2>$null
+              if ($tsIP -and $tsIP -match '^\d+\.\d+\.\d+\.\d+$') {
+                  Write-Host "✅ Tailscale IP: $tsIP"
+                  break
+              }
+              Start-Sleep -Seconds 5
+          }
+          
+          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 2. Download & Install RustDesk
+        shell: powershell
+        run: |
+          Write-Host "=== Downloading RustDesk ==="
+          $rustdeskUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.2.7/rustdesk-1.2.7-x86_64.exe"
+          Invoke-WebRequest -Uri $rustdeskUrl -OutFile "RustDesk.exe"
+          
+          Write-Host "=== Installing RustDesk ==="
+          Start-Process -FilePath "RustDesk.exe" -ArgumentList "--silent-install" -Wait
+          
+          Start-Sleep -Seconds 15
+          
+          $rustdeskPath = "$env:ProgramFiles\RustDesk\RustDesk.exe"
+          if (-not (Test-Path $rustdeskPath)) {
+              Write-Error "RustDesk installation failed!"
+              exit 1
+          }
+          
+          Write-Host "✅ RustDesk installed successfully"
+
+      - name: 3. Configure RustDesk
+        shell: powershell
+        run: |
+          Write-Host "=== Starting RustDesk Service ==="
+          $rustdesk = "$env:ProgramFiles\RustDesk\RustDesk.exe"
+          
+          # تشغيل الخدمة
+          Start-Process -FilePath $rustdesk -ArgumentList "--service" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+          
+          # الحصول على ID
+          $id = $null
+          for ($i = 1; $i -le 20; $i++) {
+              try {
+                  $config = Get-Content "$env:AppData\..\LocalAppData\RustDesk\config\RustDesk2.toml" -ErrorAction SilentlyContinue
+                  $idLine = $config | Select-String "id = "
+                  if ($idLine) {
+                      $id = $idLine -replace '.*id = "([^"]+)".*', '$1'
+                      if ($id -and $id.Length -gt 5) {
+                          break
+                      }
+                  }
+              } catch {}
+              Write-Host "Waiting for RustDesk ID... ($i/20)"
+              Start-Sleep -Seconds 3
+          }
+          
+          if (-not $id) {
+              Write-Error "Failed to get RustDesk ID"
+              exit 1
+          }
+          
+          Write-Host "✅ RustDesk ID: $id"
+          "RUSTDESK_ID=$id" | Out-File -Append $env:GITHUB_ENV
+          
+          # تعيين كلمة مرور
+          $password = "Rust@12345"
+          & $rustdesk --password $password
+          
+          Write-Host "✅ Password set: $password"
+          "RUSTDESK_PASS=$password" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 4. Display Connection Info
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "============================================="
+          Write-Host "     RUSTDESK CONNECTION READY"
+          Write-Host "============================================="
+          Write-Host "  RustDesk ID  : $env:RUSTDESK_ID"
+          Write-Host "  Password     : $env:RUSTDESK_PASS"
+          Write-Host "  Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "============================================="
+          Write-Host ""
+          Write-Host "How to connect:"
+          Write-Host "1. Install RustDesk on your phone/PC"
+          Write-Host "2. Enter the ID above"
+          Write-Host "3. Enter the password when prompted"
+          Write-Host "============================================="
+
+      - name: 5. Keep Alive
+        shell: powershell
+        run: |
+          $endTime = (Get-Date).AddHours(5).AddMinutes(50)
+          $counter = 0
+          
+          while ((Get-Date) -lt $endTime) {
+              $counter++
+              $remaining = [math]::Round((($endTime - (Get-Date)).TotalMinutes), 0)
+              
+              if ($counter % 5 -eq 0) {
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | ID: $env:RUSTDESK_ID | $remaining min left"
+              } else {
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | Active | $remaining min"
+              }
+              
+              Start-Sleep -Seconds 120
+          }
+          
+          Write-Host "✅ Session completed"
