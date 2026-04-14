@@ -1,0 +1,138 @@
+name: RDP Tailscale Ultra Stable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: 1. Install Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile tailscale.msi
+          Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
+
+          Write-Output "Waiting for Tailscale service..."
+          for ($i = 0; $i -lt 30; $i++) {
+            $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq "Running") {
+              Write-Output "✅ Tailscale service is running."
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+
+      - name: 2. Connect Tailscale
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $key = "${{ secrets.TAILSCALE_AUTHKEY }}"
+
+          # تنظيف أي اتصال قديم
+          & $ts logout 2>$null
+          Start-Sleep -Seconds 2
+
+          Write-Output "Connecting to Tailscale..."
+          
+          # ✅ استخدام Start-Job (يشتغل في الخلفية ويرجع فوراً)
+          $job = Start-Job -ScriptBlock {
+            param($tsPath, $authKey, $runId)
+            & $tsPath up --authkey=$authKey --accept-routes --hostname="rdp-$runId" 2>&1
+          } -ArgumentList $ts, $key, "${{ github.run_id }}"
+
+          # ✅ انتظار الـ Job مع timeout
+          $completed = Wait-Job -Job $job -Timeout 45
+
+          if ($completed) {
+            $output = Receive-Job -Job $job
+            Write-Output "Tailscale output:"
+            $output | ForEach-Object { Write-Output $_ }
+          } else {
+            Write-Output "⚠️ Tailscale up timed out (this is sometimes OK)"
+            Stop-Job -Job $job
+          }
+
+          Remove-Job -Job $job -Force
+
+          # ✅ انتظار وفحص الحالة
+          Start-Sleep -Seconds 5
+          
+          Write-Output "`n=== Tailscale Status ==="
+          & $ts status
+
+          # ✅ الحصول على IP
+          $ip = $null
+          for ($i = 1; $i -le 15; $i++) {
+            $ip = (& $ts ip -4 2>$null) | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+            if ($ip) {
+              $ip = $ip.Trim()
+              Write-Output "✅ Got IP: $ip"
+              break
+            }
+            Write-Output "Waiting for IP... ($i/15)"
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $ip) {
+            Write-Error "❌ Failed to get IP from Tailscale!"
+            Write-Output "`nFull status:"
+            & $ts status --json
+            exit 1
+          }
+
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 3. Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Output "Enabling RDP..."
+          
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=tcp localport=3389 | Out-Null
+          
+          net user runneradmin "Rdp@123456"
+          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
+          
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+          
+          Write-Output "✅ RDP enabled successfully!"
+
+      - name: 4. Display Connection Info
+        shell: powershell
+        run: |
+          Write-Output ""
+          Write-Output "╔════════════════════════════════════════════╗"
+          Write-Output "║       🖥️  RDP CONNECTION READY           ║"
+          Write-Output "╠════════════════════════════════════════════╣"
+          Write-Output "║  IP   : $env:TS_IP"
+          Write-Output "║  User : runneradmin                        ║"
+          Write-Output "║  Pass : Rdp@123456                         ║"
+          Write-Output "║  Port : 3389                               ║"
+          Write-Output "╚════════════════════════════════════════════╝"
+          Write-Output ""
+
+      - name: 5. Keep Alive (5h 45m)
+        shell: powershell
+        run: |
+          $end = (Get-Date).AddMinutes(345)
+          $count = 0
+
+          while ((Get-Date) -lt $end) {
+            $count++
+            $remaining = [math]::Round((($end - (Get-Date)).TotalMinutes), 0)
+            Write-Output "[$count] $(Get-Date -Format 'HH:mm:ss') | ⏱️  $remaining minutes remaining"
+            Start-Sleep -Seconds 120  # كل دقيقتين
+          }
+
+          Write-Output "✅ Session completed."
