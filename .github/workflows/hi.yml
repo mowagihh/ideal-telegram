@@ -1,0 +1,140 @@
+name: RDP Tailscale Ultra Stable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 350  # ✅ أقل من حد GitHub (6 ساعات)
+
+    steps:
+      - name: 1. Install Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile tailscale.msi
+          Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
+
+          # ✅ انتظار خدمة Tailscale تبدأ
+          Write-Output "Waiting for Tailscale service..."
+          $retries = 0
+          while ($retries -lt 30) {
+            $svc = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq "Running") {
+              Write-Output "Tailscale service is running."
+              break
+            }
+            Start-Sleep -Seconds 2
+            $retries++
+          }
+
+          if ($retries -ge 30) {
+            Write-Error "Tailscale service failed to start!"
+            exit 1
+          }
+
+      - name: 2. Connect Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          # ✅ التأكد إن الملف موجود
+          if (-not (Test-Path $ts)) {
+            Write-Error "tailscale.exe not found!"
+            exit 1
+          }
+
+          & $ts up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --accept-routes --reset --hostname="rdp-${{ github.run_id }}"
+
+          # ✅ انتظار أطول مع retry للـ IP
+          $ip = $null
+          for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 3
+            $ip = (& $ts ip -4 2>$null)
+            if ($ip -and $ip.Trim() -ne "") {
+              $ip = $ip.Trim()
+              break
+            }
+            Write-Output "Waiting for Tailscale IP... attempt $($i+1)"
+          }
+
+          if (-not $ip) {
+            Write-Error "ERROR: No IP from Tailscale after retries"
+            & $ts status
+            exit 1
+          }
+
+          # ✅ الطريقة الصحيحة لكتابة Environment Variable
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Output "TAILSCALE IP: $ip"
+
+      - name: 3. Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0
+
+          # ✅ تفعيل NLA (أمان أفضل)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # ✅ إضافة Firewall rule صريحة كمان
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=tcp localport=3389
+
+          # Set password
+          net user runneradmin "Rdp@123"
+
+          # ✅ التأكد إن اليوزر في Remote Desktop Users group
+          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
+
+          # Fix black screen
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUsername /t REG_SZ /d runneradmin /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "Rdp@123" /f
+
+          # ✅ التأكد إن RDP Service شغالة
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+
+          Write-Output "RDP READY!"
+
+      - name: 4. Show Info + Keep Alive
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # ✅ 5 ساعات و 45 دقيقة (أقل من حد GitHub الـ 6 ساعات)
+          $end = (Get-Date).AddMinutes(345)
+
+          Write-Output ""
+          Write-Output "============================================"
+          Write-Output "         RDP CONNECTION DETAILS"
+          Write-Output "============================================"
+          Write-Output "  IP  : $env:TS_IP"
+          Write-Output "  USER: runneradmin"
+          Write-Output "  PASS: Rdp@123"
+          Write-Output "  PORT: 3389"
+          Write-Output "============================================"
+          Write-Output "  Session ends at: $end"
+          Write-Output "============================================"
+          Write-Output ""
+
+          while ((Get-Date) -lt $end) {
+            # ✅ فحص إن Tailscale لسه شغال
+            $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+            $status = & $ts status 2>$null
+            Write-Output "$(Get-Date -Format 'HH:mm:ss') - Alive | TS: $($status.Substring(0, [Math]::Min(50, $status.Length)))"
+            Start-Sleep -Seconds 60
+          }
+
+          Write-Output "Session ended."
