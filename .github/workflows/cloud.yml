@@ -1,0 +1,59 @@
+name: RDP Cloudflare (Stable)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Set password
+          net user runneradmin Rdp@123
+
+          # Fix black screen
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUsername /t REG_SZ /d runneradmin /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d Rdp@123 /f
+
+          Write-Output "RDP_READY"
+
+      - name: 2. Download Cloudflared
+        shell: powershell
+        run: |
+          Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+
+      - name: 3. Start Tunnel
+        shell: powershell
+        run: |
+          Start-Process .\cloudflared.exe -ArgumentList "tunnel --url tcp://localhost:3389" -NoNewWindow
+
+          Start-Sleep -Seconds 10
+
+          # قراءة الرابط من اللوج (طريقة بديلة)
+          Write-Output "CHECK ABOVE FOR CLOUDFLARE LINK"
+
+      - name: 4. Keep Alive
+        shell: powershell
+        run: |
+          $end = (Get-Date).AddHours(6)
+
+          Write-Output "RDP READY (CLOUDFLARE)"
+          Write-Output "USER: runneradmin"
+          Write-Output "PASS: Rdp@123"
+
+          while ((Get-Date) -lt $end) {
+            Write-Output (Get-Date)
+            Start-Sleep -Seconds 60
+          }
