@@ -1,0 +1,66 @@
+name: RDP Direct (No Tailscale)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Set password
+          net user runneradmin Rdp@123
+
+          # Fix black screen
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUsername /t REG_SZ /d runneradmin /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d Rdp@123 /f
+
+          Write-Host "RDP_READY"
+
+      - name: 2. Download ngrok
+        shell: powershell
+        run: |
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip
+          cd ngrok
+
+          # ضع التوكن بتاعك هنا
+          .\ngrok.exe config add-authtoken ${{ secrets.NGROK_TOKEN }}
+
+          Start-Process .\ngrok.exe -ArgumentList "tcp 3389" -NoNewWindow
+
+          Start-Sleep -Seconds 10
+
+          $tunnel = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels
+          $url = $tunnel.tunnels[0].public_url
+
+          echo "RDP_URL=$url" >> $env:GITHUB_ENV
+
+      - name: 3. Show Info + Keep Alive
+        shell: powershell
+        run: |
+          $end = (Get-Date).AddHours(6)
+
+          Write-Host "================================="
+          Write-Host "🔥 RDP READY (NGROK)"
+          Write-Host "URL: $env:RDP_URL"
+          Write-Host "User: runneradmin"
+          Write-Host "Pass: Rdp@123"
+          Write-Host "================================="
+
+          while ((Get-Date) -lt $end) {
+            Write-Host (Get-Date)
+            Start-Sleep -Seconds 60
+          }
