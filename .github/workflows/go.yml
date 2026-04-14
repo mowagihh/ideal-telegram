@@ -1,0 +1,72 @@
+name: RDP Direct Stable (No Errors)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Set password
+          net user runneradmin Rdp@123
+
+          # Fix black screen
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUsername /t REG_SZ /d runneradmin /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d Rdp@123 /f
+
+          Write-Output "RDP_READY"
+
+      - name: 2. Setup ngrok
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip
+
+          cd ngrok
+
+          .\ngrok.exe config add-authtoken ${{ secrets.NGROK_TOKEN }}
+
+          Start-Process .\ngrok.exe -ArgumentList "tcp 3389" -NoNewWindow
+
+          Start-Sleep -Seconds 10
+
+          $tunnel = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels
+          $url = $tunnel.tunnels[0].public_url
+
+          echo "RDP_URL=$url" >> $env:GITHUB_ENV
+
+          Write-Output "NGROK_READY"
+
+      - name: 3. Show Info + Keep Alive
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $end = (Get-Date).AddHours(6)
+
+          Write-Output "========== RDP READY =========="
+          Write-Output $env:RDP_URL
+          Write-Output "USER: runneradmin"
+          Write-Output "PASS: Rdp@123"
+          Write-Output "==============================="
+
+          while ((Get-Date) -lt $end) {
+            $now = Get-Date
+            Write-Output $now
+            Start-Sleep -Seconds 60
+          }
