@@ -1,0 +1,181 @@
+name: RDP via Tailscale - Ultra Stable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp-session:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install & Connect Tailscale
+        shell: powershell
+        run: |
+          Write-Host "[1/4] Downloading Tailscale..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          
+          Write-Host "[2/4] Installing Tailscale..."
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          
+          Write-Host "[3/4] Waiting for Tailscale service..."
+          Start-Sleep -Seconds 10
+          
+          Write-Host "[4/4] Connecting to Tailscale network..."
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          
+          Start-Process -FilePath $tsExe -ArgumentList "up", "--authkey=${{ secrets.TAILSCALE_AUTHKEY }}", "--hostname=rdp-${{ github.run_id }}", "--accept-routes", "--advertise-exit-node" -NoNewWindow
+          
+          Start-Sleep -Seconds 15
+          
+          $tsIP = $null
+          for ($i = 1; $i -le 15; $i++) {
+              $tsIP = & $tsExe ip -4 2>$null
+              if ($tsIP -and $tsIP -match '^\d+\.\d+\.\d+\.\d+$') {
+                  Write-Host "✅ Tailscale IP: $tsIP"
+                  break
+              }
+              Write-Host "Waiting for IP... ($i/15)"
+              Start-Sleep -Seconds 5
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to get Tailscale IP"
+              & $tsExe status
+              exit 1
+          }
+          
+          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+          
+          Write-Host "Tailscale Status:"
+          & $tsExe status
+
+      - name: 2. Deep RDP Configuration
+        shell: powershell
+        run: |
+          Write-Host "=== Configuring RDP (Deep Mode) ==="
+          
+          # ✅ تعطيل NLA بشكل كامل
+          Write-Host "Disabling Network Level Authentication..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # ✅ تفعيل RDP
+          Write-Host "Enabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fAllowToGetHelp" -Value 1 -Force
+          
+          # ✅ تعطيل الـ Firewall بالكامل (مؤقت)
+          Write-Host "Configuring Firewall..."
+          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+          
+          # ✅ قواعد Firewall إضافية
+          New-NetFirewallRule -DisplayName "RDP-In-TCP" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "RDP-In-UDP" -Direction Inbound -Protocol UDP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+          
+          # ✅ تعيين كلمة مرور قوية
+          Write-Host "Setting password..."
+          $pass = "Rdp@123456"
+          net user runneradmin "$pass"
+          
+          # ✅ إضافة صلاحيات كاملة
+          net localgroup "Administrators" runneradmin /add 2>$null
+          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
+          
+          Write-Host "✅ Deep RDP config completed"
+
+      - name: 3. Force RDP Service Start
+        shell: powershell
+        run: |
+          Write-Host "=== Starting RDP Services ==="
+          
+          # ✅ إيقاف وإعادة تشغيل الخدمة
+          Stop-Service -Name "TermService" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+          
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+          
+          Start-Sleep -Seconds 5
+          
+          # ✅ التحقق من حالة الخدمة
+          $svc = Get-Service -Name "TermService"
+          Write-Host "TermService Status: $($svc.Status)"
+          
+          if ($svc.Status -ne "Running") {
+              Write-Error "RDP Service is not running!"
+              exit 1
+          }
+          
+          # ✅ فحص البورت
+          $listener = Get-NetTCPConnection -LocalPort 3389 -ErrorAction SilentlyContinue
+          if ($listener) {
+              Write-Host "✅ RDP is listening on port 3389"
+          } else {
+              Write-Warning "⚠️ Port 3389 is not listening!"
+          }
+
+      - name: 4. Auto-Login Fix
+        shell: powershell
+        run: |
+          Write-Host "=== Configuring Auto-Login ==="
+          
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d "1" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName /t REG_SZ /d "runneradmin" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "Rdp@123456" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v ForceAutoLogon /t REG_SZ /d "1" /f
+          
+          # ✅ تعطيل قفل الشاشة
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f
+          
+          Write-Host "✅ Auto-login configured"
+
+      - name: 5. Connection Test & Info
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "============================================="
+          Write-Host "        RDP CONNECTION READY"
+          Write-Host "============================================="
+          Write-Host "  IP       : $env:TAILSCALE_IP"
+          Write-Host "  Username : runneradmin"
+          Write-Host "  Password : Rdp@123456"
+          Write-Host "  Port     : 3389"
+          Write-Host "============================================="
+          Write-Host ""
+          
+          # ✅ اختبار الاتصال المحلي
+          Write-Host "Testing local RDP connection..."
+          $test = Test-NetConnection -ComputerName localhost -Port 3389
+          Write-Host "Local RDP Test: $($test.TcpTestSucceeded)"
+          
+          # ✅ عرض معلومات الشبكة
+          Write-Host "`nNetwork Info:"
+          ipconfig | Select-String "IPv4"
+          
+          Write-Host "`nTailscale Peers:"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+
+      - name: 6. Keep Alive
+        shell: powershell
+        run: |
+          $endTime = (Get-Date).AddHours(5).AddMinutes(50)
+          $counter = 0
+          
+          while ((Get-Date) -lt $endTime) {
+              $counter++
+              $remaining = [math]::Round((($endTime - (Get-Date)).TotalMinutes), 0)
+              
+              if ($counter % 5 -eq 0) {
+                  $rdp = Get-Service -Name "TermService"
+                  $port = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+                  $portStatus = if ($port) { "✅" } else { "❌" }
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | RDP: $($rdp.Status) | Port: $portStatus | $remaining min left"
+              } else {
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | Active | $remaining min"
+              }
+              
+              Start-Sleep -Seconds 120
+          }
