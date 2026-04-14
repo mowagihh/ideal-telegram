@@ -1,0 +1,146 @@
+name: RDP via Tailscale - Ultra Stable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp-session:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Install & Connect Tailscale
+        shell: powershell
+        run: |
+          Write-Host "[1/4] Downloading Tailscale..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          
+          Write-Host "[2/4] Installing Tailscale..."
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          
+          Write-Host "[3/4] Waiting for Tailscale service..."
+          Start-Sleep -Seconds 8
+          
+          Write-Host "[4/4] Connecting to Tailscale network..."
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          
+          # ✅ استخدام Start-Process في الخلفية (نفس أسلوب AnyDesk)
+          Start-Process -FilePath $tsExe -ArgumentList "up", "--authkey=${{ secrets.TAILSCALE_AUTHKEY }}", "--hostname=rdp-${{ github.run_id }}", "--accept-routes" -NoNewWindow
+          
+          Start-Sleep -Seconds 10
+          
+          # ✅ محاولة الحصول على IP مع Retry
+          $tsIP = $null
+          for ($i = 1; $i -le 12; $i++) {
+              $tsIP = & $tsExe ip -4 2>$null
+              if ($tsIP -and $tsIP -match '^\d+\.\d+\.\d+\.\d+$') {
+                  Write-Host "✅ Tailscale IP: $tsIP"
+                  break
+              }
+              Write-Host "Waiting for IP... ($i/12)"
+              Start-Sleep -Seconds 5
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to get Tailscale IP"
+              & $tsExe status
+              exit 1
+          }
+          
+          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 2. Configure RDP Access
+        shell: powershell
+        run: |
+          Write-Host "[RDP] Enabling Remote Desktop..."
+          
+          # ✅ تفعيل RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0
+          
+          # ✅ تعطيل NLA للتوافق الأفضل
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0
+          
+          # ✅ فتح الـ Firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          New-NetFirewallRule -DisplayName "RDP-Custom" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+          
+          Write-Host "[RDP] Setting user password..."
+          net user runneradmin "Rdp@123456"
+          
+          # ✅ إضافة لمجموعة RDP
+          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
+          
+          # ✅ تشغيل خدمة RDP
+          Set-Service -Name "TermService" -StartupType Automatic
+          Restart-Service -Name "TermService" -Force
+          
+          Write-Host "✅ RDP configured successfully!"
+
+      - name: 3. Fix Black Screen (Auto-Login)
+        shell: powershell
+        run: |
+          Write-Host "[FIX] Configuring auto-login to prevent black screen..."
+          
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d "1" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName /t REG_SZ /d "runneradmin" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /t REG_SZ /d "Rdp@123456" /f
+          
+          Write-Host "✅ Auto-login enabled"
+
+      - name: 4. Connection Info & Keep Alive
+        shell: powershell
+        run: |
+          $endTime = (Get-Date).AddHours(5).AddMinutes(50)  # 5h 50m (أقل من حد GitHub)
+          
+          Write-Host ""
+          Write-Host "╔═══════════════════════════════════════════════╗"
+          Write-Host "║          🖥️  RDP CONNECTION READY            ║"
+          Write-Host "╠═══════════════════════════════════════════════╣"
+          Write-Host "║  Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "║  Username     : runneradmin                   ║"
+          Write-Host "║  Password     : Rdp@123456                    ║"
+          Write-Host "║  Port         : 3389                          ║"
+          Write-Host "╠═══════════════════════════════════════════════╣"
+          Write-Host "║  Session ends : $($endTime.ToString('HH:mm'))            ║"
+          Write-Host "╚═══════════════════════════════════════════════╝"
+          Write-Host ""
+          
+          # ✅ حفظ المعلومات في ملف نصي على Desktop
+          $info = @"
+RDP Connection Details
+======================
+IP       : $env:TAILSCALE_IP
+Username : runneradmin
+Password : Rdp@123456
+Port     : 3389
+
+How to connect:
+1. Open Remote Desktop app
+2. Enter the Tailscale IP
+3. Use the credentials above
+"@
+          $info | Out-File -FilePath "C:\Users\runneradmin\Desktop\RDP_INFO.txt" -Encoding UTF8
+          
+          # ✅ Keep Alive Loop
+          $counter = 0
+          while ((Get-Date) -lt $endTime) {
+              $counter++
+              $remaining = [math]::Round((($endTime - (Get-Date)).TotalMinutes), 0)
+              
+              # ✅ فحص حالة RDP كل 10 دقائق
+              if ($counter % 5 -eq 0) {
+                  $rdpService = Get-Service -Name "TermService"
+                  $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --self
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | RDP: $($rdpService.Status) | TS: Online | ⏱️  $remaining min left"
+              } else {
+                  Write-Host "[$counter] $(Get-Date -Format 'HH:mm:ss') | 🟢 Active | $remaining minutes remaining"
+              }
+              
+              Start-Sleep -Seconds 120  # كل دقيقتين
+          }
+          
+          Write-Host "✅ Session completed successfully."
